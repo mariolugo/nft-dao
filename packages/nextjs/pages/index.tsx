@@ -1,34 +1,259 @@
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { clsx } from "clsx";
 import type { NextPage } from "next";
+import { formatEther } from "viem/utils";
+import { useAccount, useBalance, useNetwork } from "wagmi";
+import { readContract } from "wagmi/actions";
 import { BugAntIcon, MagnifyingGlassIcon } from "@heroicons/react/24/outline";
 import { MetaHeader } from "~~/components/MetaHeader";
+import deployedContracts from "~~/contracts/deployedContracts";
+import { useDeployedContractInfo, useScaffoldContractRead, useScaffoldContractWrite } from "~~/hooks/scaffold-eth";
 
 const Home: NextPage = () => {
+  const { data: deployedContract } = useDeployedContractInfo("CryptoDevsDAO");
+  const { chain } = useNetwork();
+  const { address, isConnected } = useAccount();
+
+  const [isMounted, setIsMounted] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [fakeNftTokenId, setFakeNftTokenId] = useState("");
+  const [proposals, setProposals] = useState([]);
+  const [selectedTab, setSelectedTab] = useState("Create Proposal");
+  const [proposalId, setProposalId] = useState(0);
+  const [vote, setVote] = useState();
+
+  const chainId = chain?.id ?? 0;
+
+  const { data: daoOwner } = useScaffoldContractRead({
+    contractName: "CryptoDevsDAO",
+    functionName: "owner",
+  });
+
+  // Fetch the balance of the DAO
+  const daoBalance = useBalance({
+    address: (deployedContracts as any)[chainId as number]?.CryptoDevsDAO.address,
+  });
+
+  // Fetch the number of proposals in the DAO
+  const { data: numOfProposalsInDAO } = useScaffoldContractRead({
+    contractName: "CryptoDevsDAO",
+    functionName: "numProposals",
+  });
+
+  // Fetch the CryptoDevs NFT balance of the user
+  const { data: nftBalanceOfUser } = useScaffoldContractRead({
+    contractName: "CryptoDevsNFT",
+    functionName: "balanceOf",
+    args: [address],
+  });
+
+  const { writeAsync: createProposal } = useScaffoldContractWrite({
+    contractName: "CryptoDevsDAO",
+    functionName: "createProposal",
+    args: [BigInt(fakeNftTokenId)],
+  });
+
+  const { writeAsync: voteOnProposal } = useScaffoldContractWrite({
+    contractName: "CryptoDevsDAO",
+    functionName: "voteOnProposal",
+    args: [BigInt(proposalId), vote],
+  });
+
+  const { writeAsync: executeProposal } = useScaffoldContractWrite({
+    contractName: "CryptoDevsDAO",
+    functionName: "executeProposal",
+    args: [BigInt(proposalId)],
+  });
+
+  const { writeAsync: withdrawEther } = useScaffoldContractWrite({
+    contractName: "CryptoDevsDAO",
+    functionName: "withdrawEther",
+  });
+
+  /**
+   * Created proposal
+   */
+  async function handleCreateProposal() {
+    setLoading(true);
+
+    try {
+      await createProposal();
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /**
+   * Fetch proposal id
+   */
+  async function fetchProposalById(id: number) {
+    try {
+      if (deployedContract) {
+        const proposal = await readContract({
+          address: deployedContract?.address,
+          abi: deployedContract?.abi,
+          functionName: "proposals",
+          args: [BigInt(id)],
+        });
+        const [nftTokenId, deadline, yayVotes, nayVotes, executed] = proposal;
+
+        const parsedProposal = {
+          proposalId: id,
+          nftTokenId: nftTokenId.toString(),
+          deadline: new Date(parseInt(deadline.toString()) * 1000),
+          yayVotes: yayVotes.toString(),
+          nayVotes: nayVotes.toString(),
+          executed: Boolean(executed),
+        };
+
+        return parsedProposal;
+      }
+      return null;
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Function to fetch all proposals in the DAO
+   * @returns
+   */
+  async function fetchAllProposals() {
+    try {
+      const proposals: any[] = [];
+
+      if (numOfProposalsInDAO) {
+        for (let i = 0; i < numOfProposalsInDAO; i++) {
+          const proposal = await fetchProposalById(i);
+          proposals.push(proposal);
+        }
+
+        setProposals(proposals as any);
+      }
+      return proposals;
+    } catch (error) {
+      console.error(error);
+      window.alert(error);
+    }
+  }
+
+  /**
+   *  Function to execute a proposal after deadline has been exceeded
+   */
+  async function handleExecuteProposal() {
+    setLoading(true);
+    try {
+      await executeProposal();
+    } catch (error) {
+      console.error(error);
+      window.alert(error);
+    }
+    setLoading(false);
+  }
+
+  // Function to vote YAY or NAY on a proposal
+  async function voteForProposal() {
+    setLoading(true);
+    try {
+      await voteOnProposal();
+    } catch (error) {
+      console.error(error);
+      window.alert(error);
+    }
+    setLoading(false);
+  }
+
+  async function withdraw() {
+    setLoading(true);
+    try {
+      await withdrawEther();
+    } catch (error) {
+      console.error(error);
+    }
+    setLoading(false);
+  }
+
+  function renderCreateProposalTab() {
+    if (loading) {
+      return (
+        <div>
+          <p>Loading... Waiting for transaction...</p>
+        </div>
+      );
+    } else if (nftBalanceOfUser === BigInt(0)) {
+      return (
+        <div>
+          <p>
+            {" "}
+            You do not own any CryptoDevs NFTs. <br />
+            <b>You cannot create or vote on proposals</b>
+          </p>
+        </div>
+      );
+    } else {
+      return (
+        <div>
+          <label>Fake NFT Token ID to Purchase: </label>
+          <input placeholder="0" type="number" onChange={e => setFakeNftTokenId(e.target.value)} />
+          <button onClick={() => createProposal()}>Create</button>
+        </div>
+      );
+    }
+  }
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (selectedTab === "View Proposals") {
+      fetchAllProposals();
+    }
+  }, [selectedTab]);
+
+  if (!isMounted) return null;
+
+  console.log(daoOwner);
+
   return (
     <>
       <MetaHeader />
       <div className="flex items-center flex-col flex-grow pt-10">
         <div className="px-5">
-          <h1 className="text-center mb-8">
-            <span className="block text-2xl mb-2">Welcome to</span>
-            <span className="block text-4xl font-bold">Scaffold-ETH 2</span>
-          </h1>
-          <p className="text-center text-lg">
-            Get started by editing{" "}
-            <code className="italic bg-base-300 text-base font-bold max-w-full break-words break-all inline-block">
-              packages/nextjs/pages/index.tsx
-            </code>
-          </p>
-          <p className="text-center text-lg">
-            Edit your smart contract{" "}
-            <code className="italic bg-base-300 text-base font-bold max-w-full break-words break-all inline-block">
-              YourContract.sol
-            </code>{" "}
-            in{" "}
-            <code className="italic bg-base-300 text-base font-bold max-w-full break-words break-all inline-block">
-              packages/hardhat/contracts
-            </code>
-          </p>
+          <div>
+            <p>Your CryptoDevs NFT Balance: {nftBalanceOfUser?.toString()}</p>
+            <p>{daoBalance.data && <>Treasury Balance: {formatEther(daoBalance.data.value).toString()} ETH</>}</p>
+            <p>Total Number of Proposals: {numOfProposalsInDAO?.toString()}</p>
+          </div>
+          <div className="tabs tabs-boxed">
+            <div
+              onClick={() => setSelectedTab("Create Proposal")}
+              className={clsx("tab", {
+                "tab-active": selectedTab === "Create Proposal",
+              })}
+            >
+              Tab 1
+            </div>
+            <div
+              onClick={() => setSelectedTab("View Proposals")}
+              className={clsx("tab", {
+                "tab-active": selectedTab === "View Proposals",
+              })}
+            >
+              Tab 2
+            </div>
+          </div>
+          {selectedTab === "Create Proposal" && <>{renderCreateProposalTab()}</>}
+          <div>
+            {address && address.toLowerCase() === daoOwner?.toLowerCase() ? (
+              <div>{loading ? <button>Loading...</button> : <button onClick={withdraw}>Withdraw DAO ETH</button>}</div>
+            ) : (
+              ""
+            )}
+          </div>
         </div>
 
         <div className="flex-grow bg-base-300 w-full mt-16 px-8 py-12">
